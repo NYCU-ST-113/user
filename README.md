@@ -32,6 +32,11 @@ uvicorn main:app --host 0.0.0.0 --port 8006
 7. 把這個 JWT Token 給前端
     * 使用者之後帶著這個 Token 跟其他服務互動
 
+# Test
+```
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8006/user/verify-admin
+```
+
 # 討論
 1. login完回傳學號、email給前端、我們自己的jwt給前端
 2. 每個service都自己認證?

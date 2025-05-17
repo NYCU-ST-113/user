@@ -92,7 +92,7 @@ async def callback(request: Request):
     email = userinfo.get("email")
 
     # Check admin
-    role = UserRole.admin if username in admin_users else UserRole.user
+    role = UserRole.admin if username in admin_users else UserRole.student
 
     # 5. Generate our own JWT
     if username not in user_db: # Add user
@@ -146,6 +146,29 @@ def get_current_user(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+
+@router.get("/verify-admin")
+async def verify_admin(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+
+    token = auth_header.split(" ")[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        username = payload.get("username")
+        if not username:
+            raise HTTPException(status_code=400, detail="Invalid token payload")
+
+        # 模擬查詢資料庫
+        is_admin = username in admin_users
+        return {"is_admin": is_admin, "username": username}
+
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
 # The following function are add for test
 @router.get("/admin-only")
 async def admin_panel(user=Depends(get_current_user)):
@@ -156,3 +179,5 @@ async def admin_panel(user=Depends(get_current_user)):
 @router.get("/me")
 async def get_me(user=Depends(get_current_user)):
     return {"message": "You are logged in", "user": user}
+
+
