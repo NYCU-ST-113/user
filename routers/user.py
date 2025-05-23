@@ -6,18 +6,28 @@ import jwt
 import datetime
 import os
 from typing import Dict
-
+import mysql.connector
+import json
 
 router = APIRouter()
 
-# TODO: Simulate database
-# db: Dict[str, ApplicationForm] = {}
+def get_db_connection():
+    try:
+        return mysql.connector.connect(
+            host="data-db-1",
+            port=3306,
+            user="user",
+            password="password",
+            database="appdb"
+        )
+    except mysql.connector.Error as e:
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
 
 
 # OAuth settings
 CLIENT_ID = "ZWB85FyZfKJJVEcNIHUfeJ1v3oalgaN7FjeCpb2E"
 CLIENT_SECRET = "vxfJf9eaw5cuzExfZsUhfDolzCck6sgcedE01neQRB86AzK1r0ZB0ZMVrAiVQkYhyPuou7HDmYyy47WqpOJq0cMWLdhu8P7EdoDhrI7atp3m2puXte67m9RTKnHRWaYE"
-REDIRECT_URI = "http://140.113.207.240/user/callback"
+REDIRECT_URI = "http://localhost:8007/user/callback"
 
 # NYCU OAuth API
 NYCU_AUTHORIZE_URL = "https://id.nycu.edu.tw/o/authorize/"
@@ -29,12 +39,10 @@ JWT_SECRET = "super_secret_for_my_app"
 JWT_ALGORITHM = "HS256"
 
 
-user_db: Dict[str, User] = {}
-admin_users = {"313581017", "r112222222"}
-
 @router.get("/")
 async def test_user_service():
     return {"message": "User service is working"}
+
 # 1. Login
 @router.get("/login")
 async def login():
@@ -92,19 +100,39 @@ async def callback(request: Request):
     email = userinfo.get("email")
 
     # Check admin
-    role = UserRole.admin if username in admin_users else UserRole.student
+    conn = get_db_connection()
+    # role = UserRole.admin if username in admin_users else UserRole.student
 
     # 5. Generate our own JWT
-    if username not in user_db: # Add user
-        user_db[username] = User(username=username, email=email, role=role)
+    try:
+        with conn.cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT * FROM users WHERE username = %s", (username,))
+            existing_user = cursor.fetchone()
 
-    user = user_db[username]
-
+            if not existing_user:
+                # Add account
+                default_role = UserRole.student.value
+                cursor.execute(
+                    "INSERT INTO users (username, email, role) VALUES (%s, %s, %s)",
+                    (username, email, default_role)
+                )
+                conn.commit()
+                role = default_role
+            else:
+                role = existing_user["role"]
+                if existing_user["email"] != email:
+                    cursor.execute(
+                        "UPDATE users SET email = %s WHERE username = %s",
+                        (email, username)
+                    )
+                    conn.commit()
+    finally:
+        conn.close()
 
     jwt_payload = {
-        "username": user.username,
-        "email": user.email,
-        "role": user.role.value,
+        "username": username,
+        "email": email,
+        "role": role,
         "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
     }
     print(jwt_payload)
@@ -128,7 +156,7 @@ async def callback(request: Request):
 @router.get("/logout")
 async def logout():
     response = JSONResponse(content={"message": "Logged out"})
-    response.delete_cookie(key="access_token")
+    # response.delete_cookie(key="access_token")
     return response
 
 def get_current_user(request: Request) -> dict:
@@ -160,9 +188,18 @@ async def verify_admin(request: Request):
         if not username:
             raise HTTPException(status_code=400, detail="Invalid token payload")
 
-        # 模擬查詢資料庫
-        is_admin = username in admin_users
-        return {"is_admin": is_admin, "username": username}
+        conn = get_db_connection()
+        try:
+            with conn.cursor(dictionary=True) as cursor:
+                cursor.execute("SELECT role FROM users WHERE username = %s", (username,))
+                user = cursor.fetchone()
+                if not user:
+                    raise HTTPException(status_code=404, detail="User not found")
+
+                is_admin = user["role"] == "admin"
+                return {"is_admin": is_admin, "username": username}
+        finally:
+            conn.close()
 
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -170,14 +207,24 @@ async def verify_admin(request: Request):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # The following function are add for test
-@router.get("/admin-only")
-async def admin_panel(user=Depends(get_current_user)):
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Permission denied")
-    return {"message": f"Hello admin {user['username']}!"}
 
 @router.get("/me")
-async def get_me(user=Depends(get_current_user)):
-    return {"message": "You are logged in", "user": user}
+async def get_me(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = auth_header.split(" ")[1]
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        username = payload.get("username")
+        if not username:
+            raise HTTPException(status_code=400, detail="Invalid token payload")
+        return {"message": "You are logged in", "user": username}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    
 
 

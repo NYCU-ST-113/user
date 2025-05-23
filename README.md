@@ -85,3 +85,44 @@ location / {
 }
 
 ```
+
+# Table
+```
+CREATE TABLE users (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(100) NOT NULL UNIQUE,
+    email VARCHAR(255),
+    role ENUM('student', 'admin') DEFAULT 'student'
+);
+```
+
+
+# Docker
+## Rebuild
+```
+docker stop data-user-1 && docker rm data-user-1
+docker build -t data-user .
+
+docker run -d \
+  --name data-user-1 \
+  -p 8007:8000 \
+  --network data_app-network \
+  --restart unless-stopped \
+  -e DATABASE_URL=mysql://user:password@db:3306/appdb \
+  data-user
+
+docker exec -it data-user-1 python3 -c "import mysql.connector; print('OK')"
+
+sudo docker exec -it data-user-1 bash
+
+```
+
+# Test end point
+```
+curl -X GET http://localhost:8007/user/verify-admin \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6IjMxMzU4MTAxNyIsImVtYWlsIjoieXV4dW4uaWkxM0BueWN1LmVkdS50dyIsInJvbGUiOiJhZG1pbiIsImV4cCI6MTc0Nzk5ODc0OX0.2pf7zYhSagzaa-Z-3ZpZ1jvAenev2NENb6Ku8ThQOl8"
+
+curl -X GET http://localhost:8007/user/me \
+  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VybmFtZSI6IjMxMzU4MTAxNyIsImVtYWlsIjoieXV4dW4uaWkxM0BueWN1LmVkdS50dyIsInJvbGUiOiJhZG1pbiIsImV4cCI6MTc0Nzk5ODc0OX0.2pf7zYhSagzaa-Z-3ZpZ1jvAenev2NENb6Ku8ThQOl8"
+
+```
