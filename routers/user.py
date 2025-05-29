@@ -27,7 +27,7 @@ def get_db_connection():
 # OAuth settings
 CLIENT_ID = "ZWB85FyZfKJJVEcNIHUfeJ1v3oalgaN7FjeCpb2E"
 CLIENT_SECRET = "vxfJf9eaw5cuzExfZsUhfDolzCck6sgcedE01neQRB86AzK1r0ZB0ZMVrAiVQkYhyPuou7HDmYyy47WqpOJq0cMWLdhu8P7EdoDhrI7atp3m2puXte67m9RTKnHRWaYE"
-REDIRECT_URI = "http://localhost:8007/user/callback"
+REDIRECT_URI = "http://140.113.207.240/user/callback"
 
 # NYCU OAuth API
 NYCU_AUTHORIZE_URL = "https://id.nycu.edu.tw/o/authorize/"
@@ -144,7 +144,7 @@ async def callback(request: Request):
         "jwt_token": jwt_token,
         "user_info": userinfo
     }
-    # frontend_url = "https://your-frontend.com/callback"  # 你前端頁面（通常是處理登入完成後的頁面）
+    # frontend_url = "https://172.18.0.6/callback"  
     # params = {
     #     "token": jwt_token,
     #     "username": userinfo.get("username")
