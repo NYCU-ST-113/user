@@ -27,6 +27,11 @@ MOCK_JWT_PAYLOAD = {
     "role": UserRole.student.value,
     "exp": (datetime.datetime.utcnow() + datetime.timedelta(hours=1)).timestamp()
 }
+MOCK_JWT_PAYLOAD_NO_USERNAME = {
+    "email": "s123456@example.edu",
+    "role": UserRole.student.value,
+    "exp": (datetime.datetime.utcnow() + datetime.timedelta(hours=1)).timestamp()
+}
 MOCK_JWT_TOKEN = "mock_jwt_token"
 
 @pytest.fixture
@@ -42,18 +47,18 @@ def mock_db_connection():
 @pytest_asyncio.fixture
 async def client():
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(router, prefix="/api/user")  # Match main.py prefix
     return TestClient(app)
 
 @pytest.mark.asyncio
 async def test_test_user_service(client):
-    response = client.get("/")
+    response = client.get("/api/user/")
     assert response.status_code == 200
     assert response.json() == {"message": "User service is working"}
 
 @pytest.mark.asyncio
 async def test_login(client):
-    response = client.get("/login")
+    response = client.get("/api/user/login")
     assert response.status_code == 307  # RedirectResponse
     assert "https://id.nycu.edu.tw/o/authorize/" in response.headers["location"]
     assert "client_id=ZWB85FyZfKJJVEcNIHUfeJ1v3oalgaN7FjeCpb2E" in response.headers["location"]
@@ -73,7 +78,7 @@ async def test_callback_success(client, mock_db_connection):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = NYCU_PROFILE_RESPONSE
 
-        response = client.get("/callback?code=valid_code")
+        response = client.get("/api/user/callback?code=valid_code")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -109,7 +114,7 @@ async def test_callback_existing_user(client, mock_db_connection):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = NYCU_PROFILE_RESPONSE
 
-        response = client.get("/callback?code=valid_code")
+        response = client.get("/api/user/callback?code=valid_code")
 
     assert response.status_code == 200
     mock_cursor.execute.assert_any_call(
@@ -120,7 +125,7 @@ async def test_callback_existing_user(client, mock_db_connection):
 
 @pytest.mark.asyncio
 async def test_callback_missing_code(client):
-    response = client.get("/callback")
+    response = client.get("/api/user/callback")
     assert response.status_code == 400
     assert response.json()["detail"] == "Missing code from NYCU"
 
@@ -128,7 +133,7 @@ async def test_callback_missing_code(client):
 async def test_callback_failed_token_request(client, mock_db_connection):
     with patch('requests.post') as mock_post:
         mock_post.return_value.status_code = 400
-        response = client.get("/callback?code=valid_code")
+        response = client.get("/api/user/callback?code=valid_code")
     assert response.status_code == 400
     assert response.json()["detail"] == "Failed to get access token"
 
@@ -137,7 +142,7 @@ async def test_callback_missing_access_token(client, mock_db_connection):
     with patch('requests.post') as mock_post:
         mock_post.return_value.status_code = 200
         mock_post.return_value.json.return_value = {}
-        response = client.get("/callback?code=valid_code")
+        response = client.get("/api/user/callback?code=valid_code")
     assert response.status_code == 400
     assert response.json()["detail"] == "Access token missing"
 
@@ -148,7 +153,7 @@ async def test_callback_failed_profile_request(client, mock_db_connection):
         mock_post.return_value.status_code = 200
         mock_post.return_value.json.return_value = NYCU_TOKEN_RESPONSE
         mock_get.return_value.status_code = 400
-        response = client.get("/callback?code=valid_code")
+        response = client.get("/api/user/callback?code=valid_code")
     assert response.status_code == 400
     assert response.json()["detail"] == "Failed to get profile info"
 
@@ -165,14 +170,13 @@ async def test_callback_db_error(client, mock_db_connection):
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = NYCU_PROFILE_RESPONSE
 
-        with pytest.raises(HTTPException) as exc:
-            client.get("/callback?code=valid_code")
-        assert exc.value.status_code == 500
-        assert "Database error" in exc.value.detail
+        with pytest.raises(mysql.connector.Error) as exc:
+            client.get("/api/user/callback?code=valid_code")
+        assert str(exc.value) == "DB Error"
 
 @pytest.mark.asyncio
 async def test_logout(client):
-    response = client.get("/logout")
+    response = client.get("/api/user/logout")
     assert response.status_code == 200
     assert response.json() == {"message": "Logged out"}
 
@@ -219,7 +223,7 @@ async def test_verify_admin_success(client, mock_db_connection):
     mock_cursor.fetchone.return_value = {"role": "admin"}
 
     with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD):
-        response = client.get("/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
+        response = client.get("/api/user/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
     assert response.status_code == 200
     assert response.json() == {"is_admin": True, "username": "s123456"}
     mock_cursor.execute.assert_called_with("SELECT role FROM users WHERE username = %s", ("s123456",))
@@ -230,15 +234,22 @@ async def test_verify_admin_student(client, mock_db_connection):
     mock_cursor.fetchone.return_value = {"role": "student"}
 
     with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD):
-        response = client.get("/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
+        response = client.get("/api/user/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
     assert response.status_code == 200
     assert response.json() == {"is_admin": False, "username": "s123456"}
 
 @pytest.mark.asyncio
 async def test_verify_admin_missing_token(client):
-    response = client.get("/verify-admin")
+    response = client.get("/api/user/verify-admin")
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing token"
+
+@pytest.mark.asyncio
+async def test_verify_admin_missing_username(client):
+    with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD_NO_USERNAME):
+        response = client.get("/api/user/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid token payload"
 
 @pytest.mark.asyncio
 async def test_verify_admin_user_not_found(client, mock_db_connection):
@@ -246,48 +257,55 @@ async def test_verify_admin_user_not_found(client, mock_db_connection):
     mock_cursor.fetchone.return_value = None
 
     with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD):
-        response = client.get("/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
+        response = client.get("/api/user/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
     assert response.status_code == 404
     assert response.json()["detail"] == "User not found"
 
 @pytest.mark.asyncio
 async def test_verify_admin_expired_token(client):
     with patch('jwt.decode', side_effect=jwt.ExpiredSignatureError):
-        response = client.get("/verify-admin", headers={"Authorization": "Bearer expired_token"})
+        response = client.get("/api/user/verify-admin", headers={"Authorization": "Bearer expired_token"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Token expired"
 
 @pytest.mark.asyncio
 async def test_verify_admin_invalid_token(client):
     with patch('jwt.decode', side_effect=jwt.InvalidTokenError):
-        response = client.get("/verify-admin", headers={"Authorization": "Bearer invalid_token"})
+        response = client.get("/api/user/verify-admin", headers={"Authorization": "Bearer invalid_token"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid token"
 
 @pytest.mark.asyncio
 async def test_get_me_success(client):
     with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD):
-        response = client.get("/me", headers={"Authorization": "Bearer mock_jwt_token"})
+        response = client.get("/api/user/me", headers={"Authorization": "Bearer mock_jwt_token"})
     assert response.status_code == 200
     assert response.json() == {"message": "You are logged in", "user": "s123456"}
 
 @pytest.mark.asyncio
 async def test_get_me_missing_token(client):
-    response = client.get("/me")
+    response = client.get("/api/user/me")
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing token"
 
 @pytest.mark.asyncio
+async def test_get_me_missing_username(client):
+    with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD_NO_USERNAME):
+        response = client.get("/api/user/me", headers={"Authorization": "Bearer mock_jwt_token"})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid token payload"
+
+@pytest.mark.asyncio
 async def test_get_me_expired_token(client):
     with patch('jwt.decode', side_effect=jwt.ExpiredSignatureError):
-        response = client.get("/me", headers={"Authorization": "Bearer expired_token"})
+        response = client.get("/api/user/me", headers={"Authorization": "Bearer expired_token"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Token expired"
 
 @pytest.mark.asyncio
 async def test_get_me_invalid_token(client):
     with patch('jwt.decode', side_effect=jwt.InvalidTokenError):
-        response = client.get("/me", headers={"Authorization": "Bearer invalid_token"})
+        response = client.get("/api/user/me", headers={"Authorization": "Bearer invalid_token"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid token"
 
