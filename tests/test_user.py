@@ -1,221 +1,308 @@
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 import pytest
-import jwt
-from datetime import datetime, timedelta
-from unittest.mock import patch, Mock
+import pytest_asyncio
 from fastapi.testclient import TestClient
-from fastapi import FastAPI
-from main import app  # 假設 main.py 是你的 FastAPI 應用入口
+from fastapi import FastAPI, HTTPException
+from unittest.mock import MagicMock, patch
+import mysql.connector
+import jwt
+import datetime
+from routers.user import router, get_db_connection, get_current_user
+from models import UserRole
 
-client = TestClient(app)
-
-# 模擬常量
+# Mock OAuth and JWT settings
+NYCU_TOKEN_RESPONSE = {
+    "access_token": "mock_access_token",
+    "token_type": "Bearer",
+    "expires_in": 3600
+}
+NYCU_PROFILE_RESPONSE = {
+    "username": "s123456",
+    "email": "s123456@example.edu"
+}
 JWT_SECRET = "super_secret_for_my_app"
 JWT_ALGORITHM = "HS256"
-MOCK_ACCESS_TOKEN = "mock_access_token"
-MOCK_USER_INFO = {"username": "test_user", "email": "test_user@example.com"}
-ADMIN_USER = "313581017"  # 模擬管理員用戶
-NON_ADMIN_USER = "test_user"
+MOCK_JWT_PAYLOAD = {
+    "username": "s123456",
+    "email": "s123456@example.edu",
+    "role": UserRole.student.value,
+    "exp": (datetime.datetime.utcnow() + datetime.timedelta(hours=1)).timestamp()
+}
+MOCK_JWT_TOKEN = "mock_jwt_token"
 
-# 輔助函數：生成模擬 JWT token
-def generate_jwt_token(username, role="user", expired=False):
-    exp = datetime.utcnow() - timedelta(hours=1) if expired else datetime.utcnow() + timedelta(hours=1)
-    payload = {
-        "username": username,
-        "email": f"{username}@example.com",
-        "role": role,
-        "exp": exp
-    }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+@pytest.fixture
+def mock_db_connection():
+    with patch('routers.user.get_db_connection') as mock_conn:
+        mock_connection = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connection.cursor.return_value.__enter__.return_value = mock_cursor
+        mock_connection.cursor.return_value.__exit__.return_value = None
+        mock_conn.return_value = mock_connection
+        yield mock_connection, mock_cursor
 
-# 測試根端點
-def test_root_service():
-    response = client.get("/user/")
+@pytest_asyncio.fixture
+async def client():
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app)
+
+@pytest.mark.asyncio
+async def test_test_user_service(client):
+    response = client.get("/")
     assert response.status_code == 200
     assert response.json() == {"message": "User service is working"}
 
-# 測試 /login 重定向
+@pytest.mark.asyncio
+async def test_login(client):
+    response = client.get("/login")
+    assert response.status_code == 307  # RedirectResponse
+    assert "https://id.nycu.edu.tw/o/authorize/" in response.headers["location"]
+    assert "client_id=ZWB85FyZfKJJVEcNIHUfeJ1v3oalgaN7FjeCpb2E" in response.headers["location"]
+    assert "redirect_uri=http%3A%2F%2F140.113.207.240%2Fapi%2Fuser%2Fcallback" in response.headers["location"]
 
-def test_login():
-    response = client.get("/user/login")
-    first = response.history[0]
-    print(first.status_code)
-    assert first.status_code == 307
-    assert "location" in first.headers
-    assert first.headers["location"].startswith("https://id.nycu.edu.tw/o/authorize/")
+@pytest.mark.asyncio
+async def test_callback_success(client, mock_db_connection):
+    mock_connection, mock_cursor = mock_db_connection
+    mock_cursor.fetchone.return_value = None  # New user
+    mock_cursor.rowcount = 1
 
+    with patch('requests.post') as mock_post, \
+         patch('requests.get') as mock_get, \
+         patch('jwt.encode', return_value=MOCK_JWT_TOKEN):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = NYCU_TOKEN_RESPONSE
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = NYCU_PROFILE_RESPONSE
 
-# 測試 /callback 成功（非管理員）
-@patch("requests.post")
-@patch("requests.get")
-def test_callback_success_non_admin(mock_get, mock_post):
-    mock_post.return_value = Mock(status_code=200, json=lambda: {"access_token": MOCK_ACCESS_TOKEN})
-    mock_get.return_value = Mock(status_code=200, json=lambda: MOCK_USER_INFO)
+        response = client.get("/callback?code=valid_code")
 
-    response = client.get("/user/callback?code=mock_code")
     assert response.status_code == 200
-    assert "jwt_token" in response.json()
-    assert "user_info" in response.json()
-    assert response.json()["user_info"]["username"] == "test_user"
+    assert response.json() == {
+        "message": "Login success",
+        "jwt_token": MOCK_JWT_TOKEN,
+        "user_info": NYCU_PROFILE_RESPONSE
+    }
+    mock_cursor.execute.assert_any_call(
+        "SELECT * FROM users WHERE username = %s", ("s123456",)
+    )
+    mock_cursor.execute.assert_any_call(
+        "INSERT INTO users (username, email, role) VALUES (%s, %s, %s)",
+        ("s123456", "s123456@example.edu", UserRole.student.value)
+    )
+    mock_connection.commit.assert_called()
+    mock_connection.close.assert_called()
 
-    jwt_token = response.json()["jwt_token"]
-    payload = jwt.decode(jwt_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    assert payload["username"] == "test_user"
-    assert payload["email"] == "test_user@example.com"
-    assert payload["role"] == "student"
+@pytest.mark.asyncio
+async def test_callback_existing_user(client, mock_db_connection):
+    mock_connection, mock_cursor = mock_db_connection
+    mock_cursor.fetchone.return_value = {
+        "username": "s123456",
+        "email": "old_email@example.edu",
+        "role": UserRole.student.value
+    }
+    mock_cursor.rowcount = 1
 
-# 測試 /callback 成功（管理員）
-@patch("requests.post")
-@patch("requests.get")
-def test_callback_success_admin(mock_get, mock_post):
-    admin_user_info = {"username": ADMIN_USER, "email": "admin@example.com"}
-    mock_post.return_value = Mock(status_code=200, json=lambda: {"access_token": MOCK_ACCESS_TOKEN})
-    mock_get.return_value = Mock(status_code=200, json=lambda: admin_user_info)
+    with patch('requests.post') as mock_post, \
+         patch('requests.get') as mock_get, \
+         patch('jwt.encode', return_value=MOCK_JWT_TOKEN):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = NYCU_TOKEN_RESPONSE
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = NYCU_PROFILE_RESPONSE
 
-    response = client.get("/user/callback?code=mock_code")
+        response = client.get("/callback?code=valid_code")
+
     assert response.status_code == 200
-    assert "jwt_token" in response.json()
-    assert response.json()["user_info"]["username"] == ADMIN_USER
+    mock_cursor.execute.assert_any_call(
+        "UPDATE users SET email = %s WHERE username = %s",
+        ("s123456@example.edu", "s123456")
+    )
+    mock_connection.commit.assert_called()
 
-    jwt_token = response.json()["jwt_token"]
-    payload = jwt.decode(jwt_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    assert payload["username"] == ADMIN_USER
-    assert payload["role"] == "admin"
-
-# 測試 /callback 缺少 code
-def test_callback_missing_code():
-    response = client.get("/user/callback")
+@pytest.mark.asyncio
+async def test_callback_missing_code(client):
+    response = client.get("/callback")
     assert response.status_code == 400
     assert response.json()["detail"] == "Missing code from NYCU"
 
-# 測試 /callback 無法取得 access token
-@patch("requests.post")
-def test_callback_access_token_failure(mock_post):
-    mock_post.return_value = Mock(status_code=400, json=lambda: {})
-    response = client.get("/user/callback?code=mock_code")
+@pytest.mark.asyncio
+async def test_callback_failed_token_request(client, mock_db_connection):
+    with patch('requests.post') as mock_post:
+        mock_post.return_value.status_code = 400
+        response = client.get("/callback?code=valid_code")
     assert response.status_code == 400
     assert response.json()["detail"] == "Failed to get access token"
 
-    mock_post.return_value = Mock(status_code=200, json=lambda: {})
-    response = client.get("/user/callback?code=mock_code")
+@pytest.mark.asyncio
+async def test_callback_missing_access_token(client, mock_db_connection):
+    with patch('requests.post') as mock_post:
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {}
+        response = client.get("/callback?code=valid_code")
     assert response.status_code == 400
     assert response.json()["detail"] == "Access token missing"
 
-# 測試 /callback 無法取得 user info
-@patch("requests.post")
-@patch("requests.get")
-def test_callback_userinfo_failure(mock_get, mock_post):
-    mock_post.return_value = Mock(status_code=200, json=lambda: {"access_token": MOCK_ACCESS_TOKEN})
-    mock_get.return_value = Mock(status_code=400)
-
-    response = client.get("/user/callback?code=mock_code")
+@pytest.mark.asyncio
+async def test_callback_failed_profile_request(client, mock_db_connection):
+    with patch('requests.post') as mock_post, \
+         patch('requests.get') as mock_get:
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = NYCU_TOKEN_RESPONSE
+        mock_get.return_value.status_code = 400
+        response = client.get("/callback?code=valid_code")
     assert response.status_code == 400
     assert response.json()["detail"] == "Failed to get profile info"
 
-# 測試 /logout
-def test_logout():
-    response = client.get("/user/logout")
+@pytest.mark.asyncio
+async def test_callback_db_error(client, mock_db_connection):
+    mock_connection, mock_cursor = mock_db_connection
+    mock_cursor.execute.side_effect = mysql.connector.Error("DB Error")
+
+    with patch('requests.post') as mock_post, \
+         patch('requests.get') as mock_get, \
+         patch('jwt.encode', return_value=MOCK_JWT_TOKEN):
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = NYCU_TOKEN_RESPONSE
+        mock_get.return_value.status_code = 200
+        mock_get.return_value.json.return_value = NYCU_PROFILE_RESPONSE
+
+        with pytest.raises(HTTPException) as exc:
+            client.get("/callback?code=valid_code")
+        assert exc.value.status_code == 500
+        assert "Database error" in exc.value.detail
+
+@pytest.mark.asyncio
+async def test_logout(client):
+    response = client.get("/logout")
     assert response.status_code == 200
     assert response.json() == {"message": "Logged out"}
-    cookie = response.headers.get("Set-Cookie", "")
-    assert "access_token=" in cookie  # 檢查 cookie 名稱
-    assert "Max-Age=0" in cookie  # 檢查 cookie 被清除
 
+@pytest.mark.asyncio
+async def test_get_current_user_success():
+    with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD):
+        request = MagicMock()
+        request.headers.get.return_value = "Bearer mock_jwt_token"
+        payload = get_current_user(request)
+        assert payload == MOCK_JWT_PAYLOAD
 
-# 測試 /verify-admin（管理員）
-def test_verify_admin_success_admin():
-    token = generate_jwt_token(ADMIN_USER, role="admin")
-    headers = {"Authorization": f"Bearer {token}"}
-    response = client.get("/user/verify-admin", headers=headers)
+@pytest.mark.asyncio
+async def test_get_current_user_no_auth_header():
+    request = MagicMock()
+    request.headers.get.return_value = None
+    with pytest.raises(HTTPException) as exc:
+        get_current_user(request)
+    assert exc.value.status_code == 401
+    assert exc.value.detail == "Unauthorized"
+
+@pytest.mark.asyncio
+async def test_get_current_user_invalid_token():
+    with patch('jwt.decode', side_effect=jwt.InvalidTokenError):
+        request = MagicMock()
+        request.headers.get.return_value = "Bearer invalid_token"
+        with pytest.raises(HTTPException) as exc:
+            get_current_user(request)
+        assert exc.value.status_code == 401
+        assert exc.value.detail == "Invalid token"
+
+@pytest.mark.asyncio
+async def test_get_current_user_expired_token():
+    with patch('jwt.decode', side_effect=jwt.ExpiredSignatureError):
+        request = MagicMock()
+        request.headers.get.return_value = "Bearer expired_token"
+        with pytest.raises(HTTPException) as exc:
+            get_current_user(request)
+        assert exc.value.status_code == 401
+        assert exc.value.detail == "Token expired"
+
+@pytest.mark.asyncio
+async def test_verify_admin_success(client, mock_db_connection):
+    mock_connection, mock_cursor = mock_db_connection
+    mock_cursor.fetchone.return_value = {"role": "admin"}
+
+    with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD):
+        response = client.get("/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
     assert response.status_code == 200
-    assert response.json() == {"is_admin": True, "username": ADMIN_USER}
+    assert response.json() == {"is_admin": True, "username": "s123456"}
+    mock_cursor.execute.assert_called_with("SELECT role FROM users WHERE username = %s", ("s123456",))
 
-# 測試 /verify-admin（非管理員）
-def test_verify_admin_success_non_admin():
-    token = generate_jwt_token(NON_ADMIN_USER, role="user")
-    headers = {"Authorization": f"Bearer {token}"}
-    response = client.get("/user/verify-admin", headers=headers)
+@pytest.mark.asyncio
+async def test_verify_admin_student(client, mock_db_connection):
+    mock_connection, mock_cursor = mock_db_connection
+    mock_cursor.fetchone.return_value = {"role": "student"}
+
+    with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD):
+        response = client.get("/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
     assert response.status_code == 200
-    assert response.json() == {"is_admin": False, "username": NON_ADMIN_USER}
+    assert response.json() == {"is_admin": False, "username": "s123456"}
 
-# 測試 /verify-admin（缺少 token）
-def test_verify_admin_missing_token():
-    response = client.get("/user/verify-admin")
+@pytest.mark.asyncio
+async def test_verify_admin_missing_token(client):
+    response = client.get("/verify-admin")
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing token"
 
-# 測試 /verify-admin（無效 token）
-def test_verify_admin_invalid_token():
-    headers = {"Authorization": "Bearer invalid_token"}
-    response = client.get("/user/verify-admin", headers=headers)
-    assert response.status_code == 401
-    assert response.json()["detail"] == "Invalid token"
+@pytest.mark.asyncio
+async def test_verify_admin_user_not_found(client, mock_db_connection):
+    mock_connection, mock_cursor = mock_db_connection
+    mock_cursor.fetchone.return_value = None
 
-# 測試 /verify-admin（過期 token）
-def test_verify_admin_expired_token():
-    token = generate_jwt_token(ADMIN_USER, role="admin", expired=True)
-    headers = {"Authorization": f"Bearer {token}"}
-    response = client.get("/user/verify-admin", headers=headers)
+    with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD):
+        response = client.get("/verify-admin", headers={"Authorization": "Bearer mock_jwt_token"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == "User not found"
+
+@pytest.mark.asyncio
+async def test_verify_admin_expired_token(client):
+    with patch('jwt.decode', side_effect=jwt.ExpiredSignatureError):
+        response = client.get("/verify-admin", headers={"Authorization": "Bearer expired_token"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Token expired"
 
-# 測試 /verify-admin（缺少 username 的 token）
-def test_verify_admin_missing_username():
-    payload = {
-        "email": "test@example.com",
-        "role": "admin",
-        "exp": datetime.utcnow() + timedelta(hours=1)
-    }
-    token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-    headers = {"Authorization": f"Bearer {token}"}
-    response = client.get("/user/verify-admin", headers=headers)
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Invalid token payload"
-
-# 測試 /admin-only（管理員）
-def test_admin_only_success():
-    token = generate_jwt_token(ADMIN_USER, role="admin")
-    headers = {"Authorization": f"Bearer {token}"}
-    response = client.get("/user/admin-only", headers=headers)
-    assert response.status_code == 200
-    assert response.json() == {"message": f"Hello admin {ADMIN_USER}!"}
-
-# 測試 /admin-only（非管理員）
-def test_admin_only_non_admin():
-    token = generate_jwt_token(NON_ADMIN_USER, role="user")
-    headers = {"Authorization": f"Bearer {token}"}
-    response = client.get("/user/admin-only", headers=headers)
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Permission denied"
-
-# 測試 /admin-only（無效 token）
-def test_admin_only_invalid_token():
-    headers = {"Authorization": "Bearer invalid_token"}
-    response = client.get("/user/admin-only", headers=headers)
+@pytest.mark.asyncio
+async def test_verify_admin_invalid_token(client):
+    with patch('jwt.decode', side_effect=jwt.InvalidTokenError):
+        response = client.get("/verify-admin", headers={"Authorization": "Bearer invalid_token"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid token"
 
-# 測試 /me（成功）
-def test_me_success():
-    token = generate_jwt_token(ADMIN_USER, role="admin")
-    headers = {"Authorization": f"Bearer {token}"}
-    response = client.get("/user/me", headers=headers)
+@pytest.mark.asyncio
+async def test_get_me_success(client):
+    with patch('jwt.decode', return_value=MOCK_JWT_PAYLOAD):
+        response = client.get("/me", headers={"Authorization": "Bearer mock_jwt_token"})
     assert response.status_code == 200
-    assert response.json()["message"] == "You are logged in"
-    assert response.json()["user"]["username"] == ADMIN_USER
-    assert response.json()["user"]["role"] == "admin"
+    assert response.json() == {"message": "You are logged in", "user": "s123456"}
 
-# 測試 /me（無效 token）
-def test_me_invalid_token():
-    headers = {"Authorization": "Bearer invalid_token"}
-    response = client.get("/user/me", headers=headers)
+@pytest.mark.asyncio
+async def test_get_me_missing_token(client):
+    response = client.get("/me")
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing token"
+
+@pytest.mark.asyncio
+async def test_get_me_expired_token(client):
+    with patch('jwt.decode', side_effect=jwt.ExpiredSignatureError):
+        response = client.get("/me", headers={"Authorization": "Bearer expired_token"})
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Token expired"
+
+@pytest.mark.asyncio
+async def test_get_me_invalid_token(client):
+    with patch('jwt.decode', side_effect=jwt.InvalidTokenError):
+        response = client.get("/me", headers={"Authorization": "Bearer invalid_token"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid token"
 
-# 測試 /me（缺少 token）
-def test_me_missing_token():
-    response = client.get("/user/me")
-    assert response.status_code == 401
-    assert response.json()["detail"] == "Unauthorized"
+@pytest.mark.asyncio
+async def test_db_connection_success():
+    with patch('mysql.connector.connect') as mock_connect:
+        mock_connect.return_value = MagicMock()
+        conn = get_db_connection()
+        assert conn is not None
+        mock_connect.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_db_connection_failure():
+    with patch('mysql.connector.connect', side_effect=mysql.connector.Error("Connection failed")):
+        with pytest.raises(HTTPException) as exc:
+            get_db_connection()
+        assert exc.value.status_code == 500
+        assert "Database connection failed" in exc.value.detail
