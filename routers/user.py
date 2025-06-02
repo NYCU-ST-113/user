@@ -8,6 +8,7 @@ import os
 from typing import Dict
 import mysql.connector
 import json
+import urllib
 
 router = APIRouter()
 
@@ -139,19 +140,15 @@ async def callback(request: Request):
     jwt_token = jwt.encode(jwt_payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     
     # Return JWT to frontend
-    return {
-        "message": "Login success",
-        "jwt_token": jwt_token,
-        "user_info": userinfo
-    }
-    # frontend_url = "https://172.18.0.6/callback"  
-    # params = {
-    #     "token": jwt_token,
-    #     "username": userinfo.get("username")
+    # return {
+    #     "message": "Login success",
+    #     "jwt_token": jwt_token,
+    #     "user_info": userinfo
     # }
-    # url_with_params = f"{frontend_url}?{urllib.parse.urlencode(params)}"
+    frontend_url = "http://172.18.0.10/"  
+    url_with_params = f"{frontend_url}?{urllib.parse.urlencode(jwt_token)}"
 
-    # return RedirectResponse(url=url_with_params)
+    return RedirectResponse(url=url_with_params)
 
 @router.get("/logout")
 async def logout():
