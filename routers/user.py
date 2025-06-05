@@ -28,8 +28,8 @@ def get_db_connection():
 # OAuth settings
 CLIENT_ID = "ZWB85FyZfKJJVEcNIHUfeJ1v3oalgaN7FjeCpb2E"
 CLIENT_SECRET = "vxfJf9eaw5cuzExfZsUhfDolzCck6sgcedE01neQRB86AzK1r0ZB0ZMVrAiVQkYhyPuou7HDmYyy47WqpOJq0cMWLdhu8P7EdoDhrI7atp3m2puXte67m9RTKnHRWaYE"
-REDIRECT_URI = "http://140.113.207.240/api/user/callback"
-
+#REDIRECT_URI = "http://127.0.0.1:5174/auth/callback" # "http://140.113.207.240/api/user/callback"
+REDIRECT_URI = "http://140.113.207.240/auth/callback"
 # NYCU OAuth API
 NYCU_AUTHORIZE_URL = "https://id.nycu.edu.tw/o/authorize/"
 NYCU_TOKEN_URL = "https://id.nycu.edu.tw/o/token/"
@@ -140,15 +140,15 @@ async def callback(request: Request):
     jwt_token = jwt.encode(jwt_payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
     
     # Return JWT to frontend
-    # return {
-    #     "message": "Login success",
-    #     "jwt_token": jwt_token,
-    #     "user_info": userinfo
-    # }
-    frontend_url = "http://172.18.0.10/"  
-    url_with_params = f"{frontend_url}?{urllib.parse.urlencode(jwt_token)}"
+    return {
+        "message": "Login success",
+        "jwt_token": jwt_token,
+        "user_info": userinfo
+    }
+    # frontend_url = "http://localhost:5174/"  
+    # url_with_params = f"{frontend_url}?{urllib.parse.urlencode(jwt_token)}"
 
-    return RedirectResponse(url=url_with_params)
+    # return RedirectResponse(url=url_with_params)
 
 @router.get("/logout")
 async def logout():
